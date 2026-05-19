@@ -50,5 +50,12 @@ jobs:
         uses: azure/setup-helm@v3
 
       - name: Deploy to Kubernetes via Helm
+        env:
+          KUBECONFIG_CONTENT: ${{ github.event.inputs.environment == 'production' && secrets.KUBECONFIG_PRODUCTION || secrets.KUBECONFIG_STAGING }}
         run: |
-          helm upgrade --install gamb-${{ github.event.inputs.environment }} ./chart             --namespace ${{ github.event.inputs.environment }}             --create-namespace             --set image.repository=${{ secrets.DOCKERHUB_USERNAME }}/gamb             --set image.tag=${{ github.event.inputs.environment }}-${{ env.IMAGE_TAG }}             --kubeconfig ${{ secrets['KUBECONFIG_' + github.event.inputs.environment | upper] }}
+          helm upgrade --install gamb-${{ github.event.inputs.environment }} ./chart \
+            --namespace ${{ github.event.inputs.environment }} \
+            --create-namespace \
+            --set image.repository=${{ secrets.DOCKERHUB_USERNAME }}/gamb \
+            --set image.tag=${{ github.event.inputs.environment }}-${{ env.IMAGE_TAG }} \
+            --kubeconfig "$KUBECONFIG_CONTENT"
