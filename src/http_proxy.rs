@@ -2,7 +2,6 @@ use crate::{
     backend_registry::BackendRegistry,
     config::{Auth, ProxyConfig},
 };
-use futures::TryStreamExt;
 use hyper::{
     body::to_bytes, server::conn::Http as HyperHttp, service::make_service_fn, Body,
     Request as HyperRequest, Response as HyperResponse, Server, StatusCode,
@@ -213,21 +212,44 @@ async fn route_request(
     rb = rb.body(body_bytes);
 
     match rb.send().await {
-        Ok(res) => {
+        Ok(mut upstream) => {
             let mut builder = HyperResponse::builder().status(
-                StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
             );
-            for (name, value) in res.headers() {
+            for (name, value) in upstream.headers() {
                 if let Ok(v) = value.to_str() {
                     builder = builder.header(name.as_str(), v);
                 }
             }
+            let (mut sender, body) = Body::channel();
             metrics.active_streams.fetch_add(1, Ordering::Relaxed);
-            let data = res.bytes().await.unwrap_or_default();
-            let elapsed = start.elapsed().as_millis() as u64;
-            metrics.latency_ms_sum.fetch_add(elapsed, Ordering::Relaxed);
-            metrics.active_streams.fetch_sub(1, Ordering::Relaxed);
-            Ok(builder.body(Body::from(data)).unwrap())
+            let stream_metrics = metrics.clone();
+            tokio::spawn(async move {
+                loop {
+                    match upstream.chunk().await {
+                        Ok(Some(chunk)) => {
+                            if sender.send_data(chunk).await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            stream_metrics
+                                .upstream_errors
+                                .fetch_add(1, Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                }
+                let elapsed = start.elapsed().as_millis() as u64;
+                stream_metrics
+                    .latency_ms_sum
+                    .fetch_add(elapsed, Ordering::Relaxed);
+                stream_metrics
+                    .active_streams
+                    .fetch_sub(1, Ordering::Relaxed);
+            });
+            Ok(builder.body(body).unwrap())
         }
         Err(_) => {
             metrics.upstream_errors.fetch_add(1, Ordering::Relaxed);
